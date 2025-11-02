@@ -1,0 +1,11 @@
+torch>=2.0
+transformers>=4.33
+peft>=0.4.0
+accelerate>=0.20.3
+bitsandbytes>=0.39.0
+sentence-transformers>=2.2.2
+faiss-cpu
+pandas
+scikit-learn
+tqdm
+numpy
