@@ -1,42 +1,23 @@
-# retrieval.py
-import faiss
-import numpy as np
+import faiss, numpy as np
 from typing import List, Tuple
 
 class FAISSIndex:
     def __init__(self, dim: int, use_gpu=False):
         self.dim = dim
-        self.use_gpu = use_gpu
-        # simple L2 index
-        self.index = faiss.IndexFlatIP(dim)  # use inner product with normalized vectors for cosine
-        self.meta = []  # store (column_name, doc_text) for each vector
+        self.index = faiss.IndexFlatIP(dim)  # cosine (after L2 norm)
+        self.meta = []
 
     def add(self, vectors: np.ndarray, metas: List[Tuple[str, str]]):
-        # vectors must be float32
-        if vectors.dtype != np.float32:
-            vectors = vectors.astype(np.float32)
+        vectors = vectors.astype("float32")
         self.index.add(vectors)
         self.meta.extend(metas)
 
-    def search(self, qvec: np.ndarray, topk=5):
-        if qvec.dtype != np.float32:
-            qvec = qvec.astype(np.float32)
-        D, I = self.index.search(qvec.reshape(1, -1), topk)
+    def search(self, qvec: np.ndarray, topk=5, score_threshold=0.5):
+        qvec = qvec.astype("float32").reshape(1, -1)
+        D, I = self.index.search(qvec, topk)
         results = []
-        for i in I[0]:
-            if i == -1: continue
-            results.append(self.meta[i])
+        for score, idx in zip(D[0], I[0]):
+            if idx == -1 or score < score_threshold:
+                continue
+            results.append((self.meta[idx], float(score)))
         return results
-
-    def batch_search(self, qvecs: np.ndarray, topk=5):
-        if qvecs.dtype != np.float32:
-            qvecs = qvecs.astype(np.float32)
-        D, I = self.index.search(qvecs, topk)
-        out = []
-        for row in I:
-            rec = []
-            for i in row:
-                if i == -1: continue
-                rec.append(self.meta[i])
-            out.append(rec)
-        return out
