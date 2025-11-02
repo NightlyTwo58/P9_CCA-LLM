@@ -1,7 +1,7 @@
 # column_encoder.py
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-from peft import prepare_model_for_peft, get_peft_model, LoraConfig, TaskType
+from peft import get_peft_model, LoraConfig, TaskType
 from typing import List
 import math
 import numpy as np
@@ -32,7 +32,6 @@ class ColumnEncoder:
 
         self.use_peft = use_peft
         if use_peft and peft_config:
-            prepare_model_for_peft(self.model)
             self.model = get_peft_model(self.model, peft_config)
 
     def save_peft(self, out_dir):
