@@ -9,6 +9,8 @@ from .retrieval import FAISSIndex
 from .cell_encoder import CellEncoder
 from .num_normalize import normalize_number
 
+# python -m src.main --csv data.csv --model_name facebook/opt-1.3b --cpu
+
 def build_column_documents(df, sample_per_col=100, max_examples=50):
     docs, meta = [], []
     for col in df.columns:

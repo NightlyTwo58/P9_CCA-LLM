@@ -88,4 +88,5 @@ class ColumnEncoder:
             norms = np.linalg.norm(vecs, axis=1, keepdims=True).clip(min=1e-9)
             vecs = vecs / norms
             out.extend(vecs.tolist())
+            print(i)
         return out
