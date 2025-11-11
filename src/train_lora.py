@@ -1,7 +1,7 @@
 # train_lora.py
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_peft
+from peft import LoraConfig, TaskType, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -25,7 +25,7 @@ def train_lora(model_name, docs, output_dir, epochs=1, batch_size=2, lr=1e-4, de
         bias="none",
         task_type=TaskType.CAUSAL_LM
     )
-    model = prepare_model_for_peft(model)
+    # model = prepare_model_for_peft(model)
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
