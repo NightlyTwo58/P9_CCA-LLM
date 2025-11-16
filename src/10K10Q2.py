@@ -1,135 +1,179 @@
 import os
-import torch
 import sys
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import StoppingCriteria, StoppingCriteriaList
-from main import build_column_documents, main as column_main
-from utils import read_csv
 import pandas as pd
-import tempfile
+from bs4 import BeautifulSoup
+from difflib import SequenceMatcher
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
+# =================== CONFIG ===================
 device = "cuda" if torch.cuda.is_available() else "cpu"
+model_name = "facebook/opt-1.3b"
+chunk_size_chars = 12000
+overlap_chars = 500
+header_reference = "Period Purchased per Share Programs under the Programs"
+similarity_threshold = 0.1
+# ============================================
 
-model_path = "C:/Users/xuena/.cache/huggingface/hub/models--facebook--opt-1.3b/snapshots/3f5c25d0bc631cb57ac65913f76e22c2dfb61d62"
-
-def parse_extracted_table(table_text, model_name="tiiuae/mistral-7b"):
-    # Convert the markdown-style table to DataFrame
-    lines = [l for l in table_text.split("\n") if "|" in l and "---" not in l]
-    headers = [h.strip() for h in lines[0].split("|")[1:-1]]
-    data = []
-    for row in lines[1:]:
-        values = [c.strip() for c in row.split("|")[1:-1]]
-        data.append(values)
-    df = pd.DataFrame(data, columns=headers)
-
-    # Save temporary CSV
-    tmp_dir = tempfile.mkdtemp()
-    tmp_csv = os.path.join(tmp_dir, "table.csv")
-    df.to_csv(tmp_csv, index=False)
-
-    # Build embeddings with your parser
-    class Args:
-        csv = "table.csv"
-        model_name = model_path
-        sample_per_col = 100
-        max_examples = 50
-        embed_batch_size = 2
-        cells_per_col = 20
-        k = 3
-        out_dir = os.path.join(tmp_dir, "out_embs")
-        project_dim = 256
-        cpu = True
-        seed = 42
-
-    args = Args()
-    column_main(args)
-    return df
-
-tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+# Load model
+tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
 model = AutoModelForCausalLM.from_pretrained(
-    model_path,
-    torch_dtype=torch.float16,
+    model_name,
     device_map="auto",
+    torch_dtype=torch.float16,
     local_files_only=True
 )
 
+# ------------------ UTILITIES ------------------
 
-def generate_prompt(file_text):
+def extract_cik_and_date(text):
+    cik = "N/A"
+    filing_date = "N/A"
+    for line in text.splitlines():
+        if "CIK" in line:
+            cik = ''.join(filter(str.isdigit, line))
+        if "Date" in line or "Filed" in line:
+            filing_date = line.split()[-1]
+        if cik != "N/A" and filing_date != "N/A":
+            break
+    return cik, filing_date
+
+def html_to_text(html_content):
+    soup = BeautifulSoup(html_content, "html.parser")
+    return soup.get_text(separator="\n")
+
+def fuzzy_similarity(a, b):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+def extract_best_chunk(text, ref_header, chunk_size=chunk_size_chars, threshold=similarity_threshold):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    best_chunk = None
+    best_score = 0
+
+    for i, line in enumerate(lines):
+        score = fuzzy_similarity(line, ref_header)
+        if score > best_score:
+            best_score = score
+            if score >= threshold:
+                start_idx = max(0, i - 2)  # include lines just above header
+                best_chunk_lines = lines[start_idx:start_idx + chunk_size]
+                best_chunk = "\n".join(best_chunk_lines)
+
+    return best_chunk if best_score >= threshold else None
+
+def generate_prompt(chunk_text):
     return (
-        f"Extract the share repurchase details from the table in the following financial filing text:\n"
-        f"\"{file_text}\".\n\n\n"
-        "Strictly output only the structured table in the exact format below, with no additional text, notes, or commentary:\n\n"
-        "CIK Number: <Extracted_CIK>\n\n"
-        "Start Date | End Date | Class of Shares | Number of Shares | Average Price per Share | Dollar Value of Shares Repurchased | Total Number of Shares Purchased as Part of Publicly Announced Plans or Programs | Maximum Number (or Approximate Dollar Value) of Shares that May Yet Be Purchased Under the Plans or Programs\n"
-        "-----------|-----------|----------------|------------------|------------------------|-----------------------------------|----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------\n"
-        "<YYYY-MM-DD> | <YYYY-MM-DD> | <Class> | <Number> | <Price> | <Dollar Value> | <Number from Plan> | <Remaining Capacity>\n"
-        "<YYYY-MM-DD> | <YYYY-MM-DD> | <Class> | <Number> | <Price> | <Dollar Value> | <Number from Plan> | <Remaining Capacity>\n"
-        "...\n"
-        "<END_OF_TABLE>\n\n"
-        "### **Instructions:**\n"
-        "- If a date is a range (e.g., 'July 2023' or 'Q2 2023'), extract a start and end date. Keep format as YYYY-MM-DD\n"
-        "- If only one date is available, repeat it in both 'Start Date' and 'End Date'.\n"
-        "- If data is missing or not found, write 'N/A'.\n"
-        "- Extract the CIK Number from the document and place it at top.\n"
-        "- Always include the <END_OF_TABLE> marker at the end of the table.\n"
-        "- Maintain the exact column names and format with separators | as shown above to ensure CSV compatibility.\n"
-        "- Output only the table content: do not include notes, instructions, or any other text."
+        f"Extract the share repurchase table from the following text chunk:\n"
+        f"{chunk_text}\n\n"
+        "Output only a structured table with columns:\n"
+        "Start Date | End Date | Class of Shares | Number of Shares | Average Price per Share | "
+        "Dollar Value of Shares Repurchased | Total Number of Shares Purchased as Part of Publicly Announced Plans or Programs | "
+        "Maximum Number (or Approximate Dollar Value) of Shares that May Yet Be Purchased Under the Plans or Programs\n"
+        "Fill missing data with N/A. Always include <END_OF_TABLE> at the end.\n"
         "OUTPUTT:"
     )
 
 def generate_text(prompt):
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096).to(device)
     with torch.no_grad():
-        output = model.generate(
-            **inputs,
-            max_new_tokens=1500,
-            temperature=0.1,
-            top_p=1.0,
-            do_sample=True, repetition_penalty=1.25, pad_token_id=tokenizer.eos_token_id, eos_token_id=tokenizer.eos_token_id)
-
+        try:
+            output = model.generate(
+                **inputs,
+                max_new_tokens=1500,
+                temperature=0.1,
+                top_p=1.0,
+                do_sample=True,
+                repetition_penalty=1.25,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id
+            )
+        except Exception as e:
+            print(f"Error during model.generate(): {e}")
+            return ""
     generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-
-    # Extract only the content after 'OUTPUTT:'
     if "OUTPUTT:" in generated_text:
-        generated_text = generated_text.split("OUTPUTT:", 1)[1].strip()
-
+        return generated_text.split("OUTPUTT:", 1)[1].strip()
     return generated_text
 
-def process_all_files(input_folder, output_folder):
-    for filename in os.listdir(input_folder):
-        if filename.endswith(".txt"):
-            input_path = os.path.join(input_folder, filename)
-            output_path = os.path.join(output_folder, filename.replace(".txt", "_parsed.csv"))
+def parse_extracted_table(table_text, cik, filing_date):
+    lines = [l for l in table_text.split("\n") if "|" in l and "---" not in l]
+    if not lines:
+        return pd.DataFrame(columns=[
+            "Start Date", "End Date", "Class of Shares", "Number of Shares",
+            "Average Price per Share", "Dollar Value of Shares Repurchased",
+            "Total Number of Shares Purchased as Part of Publicly Announced Plans or Programs",
+            "Maximum Number (or Approximate Dollar Value) of Shares that May Yet Be Purchased Under the Plans or Programs",
+            "CIK", "Filing Date"
+        ])
+    headers = [h.strip() for h in lines[0].split("|")[1:-1]]
+    data = []
+    for row in lines[1:]:
+        values = [c.strip() for c in row.split("|")[1:-1]]
+        while len(values) < len(headers):
+            values.append("N/A")
+        data.append(values)
+    df = pd.DataFrame(data, columns=headers)
+    df["CIK"] = cik
+    df["Filing Date"] = filing_date
+    return df
 
-            if os.path.exists(output_path):
-                print(f"Skipping (already exists): {filename}")
+# ------------------ MAIN PROCESS ------------------
+
+def process_all_files(input_folder, output_folder, combined_csv_path=None):
+    os.makedirs(output_folder, exist_ok=True)
+    all_dfs = []
+
+    for filename in os.listdir(input_folder):
+        if not filename.endswith(".txt"):
+            continue
+        input_path = os.path.join(input_folder, filename)
+        output_path = os.path.join(output_folder, filename.replace(".txt", "_parsed.csv"))
+
+        try:
+            with open(input_path, "r", encoding="utf-8") as f:
+                html_text = f.read()
+            plain_text = html_to_text(html_text)
+            cik, filing_date = extract_cik_and_date(plain_text)
+
+            best_chunk = extract_best_chunk(plain_text, header_reference)
+            if not best_chunk:
+                print(f"No valid repurchase table found in {filename}, skipping.")
                 continue
 
-            try:
-                with open(input_path, "r", encoding="utf-8") as file:
-                    file_text = file.read()
+            prompt = generate_prompt(best_chunk)
+            table_text = generate_text(prompt)
+            if not table_text.strip():
+                print(f"LLM returned empty output for {filename}, skipping.")
+                continue
 
-                # Step 1: LLM extraction
-                prompt = generate_prompt(file_text)
-                table_text = generate_text(prompt)
+            df = parse_extracted_table(table_text, cik, filing_date)
+            if df.empty:
+                print(f"Failed to parse table for {filename}, skipping.")
+                continue
 
-                # Step 2: Context-aware parsing
-                df = parse_extracted_table(table_text)
+            df.to_csv(output_path, index=False)
+            all_dfs.append(df)
+            print(f"Processed {filename} → {output_path}")
 
-                df.to_csv(output_path, index=False)
-                print(f"Processed and saved: {filename}")
+        except Exception as e:
+            print(f"Error processing {filename}: {e}")
 
-            except Exception as e:
-                print(f"Error processing {filename}: {e}")
+    if combined_csv_path and all_dfs:
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        combined_df.to_csv(combined_csv_path, index=False)
+        print(f"Combined CSV saved at {combined_csv_path}")
 
-# Main: expects two arguments from SLURM script - input and output folder paths
+# ------------------ ENTRY POINT ------------------
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python testing2_code.py <input_folder> <output_folder>")
-        sys.exit(1)
+    input_folder = "C:\\Users\\xuena\\OneDrive\\Documents\\GitHub\\P9_CCA-LLM\\data\\2011\\QTR1"
+    output_folder = "C:\\Users\\xuena\\OneDrive\\Documents\\GitHub\\P9_CCA-LLM\\data\\2011_output"
+    # if len(sys.argv) == 3:
+    #     input_folder = sys.argv[1]
+    #     output_folder = sys.argv[2]
+    # else:
+    #     input_folder = input("Enter input folder path: ").strip()
+    #     output_folder = input("Enter output folder path: ").strip()
 
-    input_folder = sys.argv[1]
-    output_folder = sys.argv[2]
-
-    os.makedirs(output_folder, exist_ok=True)
-    process_all_files(input_folder, output_folder)
+    combined_csv_path = os.path.join(output_folder, "all_repurchase_tables.csv")
+    process_all_files(input_folder, output_folder, combined_csv_path)

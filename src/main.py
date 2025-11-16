@@ -2,12 +2,12 @@
 import argparse, os, numpy as np, torch, json
 from tqdm import tqdm
 
-from .utils import read_csv, sample_values_for_column, make_column_document, set_seed
-from .column_encoder import ColumnEncoder
-from .projection import Projection, project_numpy
-from .retrieval import FAISSIndex
-from .cell_encoder import CellEncoder
-from .num_normalize import normalize_number
+from utils import read_csv, sample_values_for_column, make_column_document, set_seed, csv_merge
+from column_encoder import ColumnEncoder
+from projection import Projection, project_numpy
+from retrieval import FAISSIndex
+from cell_encoder import CellEncoder
+from num_normalize import normalize_number
 
 # python -m src.main --csv data.csv --model_name facebook/opt-1.3b --cpu
 
@@ -98,3 +98,4 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     main(args)
+    csv_merge("./out_embs", "merged_embeddings.csv")
