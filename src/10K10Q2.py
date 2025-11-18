@@ -4,24 +4,34 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from difflib import SequenceMatcher
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+# Add BitsAndBytesConfig to your imports
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 # =================== CONFIG ===================
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model_name = "facebook/opt-1.3b"
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
 chunk_size_chars = 12000
 overlap_chars = 500
-header_reference = "Period Purchased per Share Programs under the Programs"
+header_reference = "ITEM 2. UNREGISTERED SALES OF EQUITY SECURITIES AND USE OF PROCEEDS"
 similarity_threshold = 0.1
 # ============================================
 
+# --- Quantization Configuration ---
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+)
+
 # Load model
-tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     device_map="auto",
-    torch_dtype=torch.float16,
-    local_files_only=True
+    # Pass the quantization config
+    quantization_config=bnb_config,
+    # Use bfloat16 for better Llama performance (if supported)
+    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
 )
 
 # ------------------ UTILITIES ------------------
@@ -55,7 +65,7 @@ def extract_best_chunk(text, ref_header, chunk_size=chunk_size_chars, threshold=
         if score > best_score:
             best_score = score
             if score >= threshold:
-                start_idx = max(0, i - 2)  # include lines just above header
+                start_idx = max(0, i - 5)  # include lines just above header
                 best_chunk_lines = lines[start_idx:start_idx + chunk_size]
                 best_chunk = "\n".join(best_chunk_lines)
 
